@@ -479,13 +479,19 @@ async function extractWithPdfJs(pdf) {
   if (credM) expCredits = parseFloat(credM[1].replace(/,/g, ''));
 
   const rowRegex = new RegExp(
-    `^(?:(\\d{3,4})\\s+)?(${MONTH_REGEX_STR}\\s+\\d{1,2}|\\d{1,2}[/\\-.]\\d{1,2}(?:[/\\-.]\\d{2,4})?)\\s+(?:(${MONTH_REGEX_STR}\\s+\\d{1,2}|\\d{1,2}[/\\-.]\\d{1,2})\\s+)?(.*)$`,
+    `^(?:(\\d{3,4})\\s+)?(${MONTH_REGEX_STR}\\s*\\d{1,2}|\\d{1,2}[/\\-.]\\d{1,2}(?:[/\\-.]\\d{2,4})?)\\s+(?:(${MONTH_REGEX_STR}\\s*\\d{1,2}|\\d{1,2}[/\\-.]\\d{1,2})\\s+)?(.*)$`,
     'i'
   );
+  // TD Canada Trust and description-first statements pattern
+  const tdRowRegex = new RegExp(
+    `^(.+?)\\s+([\\d,]+\\.\\d{2})\\s+(?:([\\d,]+\\.\\d{2})\\s+)?(${MONTH_REGEX_STR}\\s*\\d{1,2})(?:\\s+([\\d,]+\\.\\d{2}(?:OD)?))?$`,
+    'i'
+  );
+  const creditKeywords = ['DEPOSIT', 'TFR-FR', 'TRANSFER FROM', 'CREDIT', 'REFUND', 'CR', 'AUTODEPOSIT', 'E-TRANSFER', 'DIRECT DEP', 'PAYROLL', 'INTEREST PAID', 'REVERSAL'];
   const amountRegex = /(\$?\s*[\d,]+\.\d{2})(-|CR)?$/i;
 
-  const startKeywords = ['TRANSACTIONS SINCE', 'TRANSACTIONS - CONTINUED', 'TRANSACTIONS', 'ACCOUNT ACTIVITY', 'DETAILS OF YOUR TRANSACTIONS'];
-  const endKeywords = ['SUB-TOTAL', 'SUB TOTAL', 'TOTAL DEBITS', 'TOTAL CREDITS', 'INTEREST CHARGES', 'ACCOUNT SUMMARY'];
+  const startKeywords = ['TRANSACTIONS SINCE', 'TRANSACTIONS - CONTINUED', 'TRANSACTIONS', 'ACCOUNT ACTIVITY', 'DETAILS OF YOUR TRANSACTIONS', 'DESCRIPTION', 'CHEQUE/DEBIT', 'DEPOSIT/CREDIT', 'STATEMENT OF ACCOUNT'];
+  const endKeywords = ['SUB-TOTAL', 'SUB TOTAL', 'TOTAL DEBITS', 'TOTAL CREDITS', 'INTEREST CHARGES', 'ACCOUNT SUMMARY', 'CHQS ENCLOSED', 'MONTHLY AVER.'];
 
   let inTx = false;
   const extracted = [];
@@ -508,16 +514,51 @@ async function extractWithPdfJs(pdf) {
       continue;
     }
 
+    if (/^(BALANCE\s+FORWARD|OPENING\s+BALANCE|PREVIOUS\s+BALANCE)/i.test(upper)) {
+      continue;
+    }
+
     if (!inTx) {
-      if (rowRegex.test(line) && amountRegex.test(line)) inTx = true;
+      if ((rowRegex.test(line) && amountRegex.test(line)) || tdRowRegex.test(line)) inTx = true;
       else continue;
     }
 
-    if (/^(REF\.?#|TRANS\.?\s*DATE|POST\s*DATE|DETAILS|AMOUNT|ACCOUNT|CARDMEMBER)/i.test(upper)) continue;
+    if (/^(REF\.?#|TRANS\.?\s*DATE|POST\s*DATE|DETAILS|AMOUNT|ACCOUNT|CARDMEMBER|CHEQUE\/DEBIT|DEPOSIT\/CREDIT)/i.test(upper)) continue;
     if (/^[A-Z\s\-]+-\s*\d{4}\s*X+/i.test(upper)) continue;
     if (upper.startsWith('CONTINUED ON PAGE')) {
       if (curTx && curTx.amount) extracted.push(curTx);
       curTx = null;
+      continue;
+    }
+
+    // Check TD / Description-first pattern
+    const tdM = line.match(tdRowRegex);
+    if (tdM) {
+      if (curTx && curTx.amount) extracted.push(curTx);
+      curTx = null;
+
+      const tdDesc = tdM[1].trim();
+      const tdAmt1 = tdM[2].replace(/,/g, '');
+      const tdDateRaw = tdM[4];
+
+      let formattedDate = tdDateRaw;
+      const monthPart = tdDateRaw.match(new RegExp(MONTH_REGEX_STR, 'i'));
+      if (monthPart) {
+        const monStr = monthPart[0].toLowerCase().slice(0, 3);
+        const dayStr = tdDateRaw.replace(new RegExp(MONTH_REGEX_STR, 'i'), '').trim();
+        const mon = MONTH_MAP[monStr] || '01';
+        const day = String(parseInt(dayStr, 10)).padStart(2, '0');
+        formattedDate = `${day}/${mon}/${year}`;
+      }
+
+      const isCred = creditKeywords.some(k => tdDesc.toUpperCase().includes(k));
+      extracted.push({
+        date: formattedDate,
+        descLines: [tdDesc],
+        amount: tdAmt1,
+        isCredit: isCred,
+        hasRef: false
+      });
       continue;
     }
 

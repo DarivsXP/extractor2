@@ -50,11 +50,11 @@ def get_status():
     has_key = bool(env_key and env_key.strip().startswith('sk-ant-'))
     return {
         'has_server_key': has_key,
-        'default_model': 'claude-haiku-4-5-20251001',
+        'default_model': 'claude-3-5-haiku-20241022',
         'models': [
-            {'id': 'claude-haiku-4-5-20251001', 'name': 'Claude Haiku 4.5'},
-            {'id': 'claude-sonnet-4-5-20250929', 'name': 'Claude Sonnet 4.5'},
-            {'id': 'claude-opus-4-5-20251101', 'name': 'Claude Opus 4.5'}
+            {'id': 'claude-3-5-haiku-20241022', 'name': 'Claude 3.5 Haiku (Fast & Cheap)'},
+            {'id': 'claude-3-5-sonnet-20241022', 'name': 'Claude 3.5 Sonnet (High Accuracy)'},
+            {'id': 'claude-3-haiku-20240307', 'name': 'Claude 3 Haiku (Legacy)'}
         ]
     }
 
@@ -73,7 +73,7 @@ async def test_key(request: Request, x_anthropic_api_key: Optional[str] = Header
         import anthropic
         client = anthropic.Anthropic(api_key=api_key.strip())
         client.messages.create(
-            model='claude-haiku-4-5-20251001',
+            model='claude-3-5-haiku-20241022',
             max_tokens=10,
             messages=[{'role': 'user', 'content': 'hi'}]
         )
@@ -102,7 +102,7 @@ async def parse_endpoint(
                 raise HTTPException(status_code=400, detail="Uploaded file does not appear to be a valid PDF format.")
 
         api_key = x_anthropic_api_key or os.environ.get('ANTHROPIC_API_KEY')
-        model = x_anthropic_model or 'claude-haiku-4-5-20251001'
+        model = x_anthropic_model or 'claude-3-5-haiku-20241022'
 
         result = parse_statement_pdf(pdf_bytes, api_key=api_key, model=model)
         transactions = result['transactions']

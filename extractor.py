@@ -36,8 +36,8 @@ def parse_date_to_dmy(date_str, statement_year="2026"):
     """
     date_str = date_str.strip().replace(',', '')
     
-    # Month name + Day: Jul 8 or Jul 08
-    m1 = re.match(rf'^({MONTH_REGEX_STR})\s+(\d{{1,2}})(?:\s+(\d{{2,4}}))?$', date_str, re.IGNORECASE)
+    # Month name + Day: Jul 8, Jul 08, JUL06, or JUL 06
+    m1 = re.match(rf'^({MONTH_REGEX_STR})\s*(\d{{1,2}})(?:[/\s](\d{{2,4}}))?$', date_str, re.IGNORECASE)
     if m1:
         mon = MONTH_MAP.get(m1.group(1).lower()[:3], '01')
         day = f"{int(m1.group(2)):02d}"
@@ -113,16 +113,17 @@ def extract_statement_metadata(all_lines):
     full_text = " \n ".join(" ".join(w['text'] for w in line_words) for _, line_words in all_lines)
     
     year = "2026"
-    period_m = re.search(r'Statement (?:Period|Date).*?(\d{4})', full_text, re.IGNORECASE)
+    period_m = re.search(r'Statement (?:Period|Date|From\s*-\s*To).*?(\d{2,4})', full_text, re.IGNORECASE)
     if period_m:
-        year = period_m.group(1)
+        raw_yr = period_m.group(1)
+        year = ("20" + raw_yr) if len(raw_yr) == 2 else raw_yr
     else:
         y_m = re.search(r'\b(202[0-9])\b', full_text)
         if y_m:
             year = y_m.group(1)
 
     expected_debits = None
-    deb_m = re.search(r'(?:Purchases/charges\s*\+|SUB-TOTAL\s+DEBITS.*?)\s*\$?\s*([\d,]+\.\d{2})', full_text, re.IGNORECASE)
+    deb_m = re.search(r'(?:Purchases/charges\s*\+|SUB-TOTAL\s+DEBITS.*?|Debits\s+\d+\s+)\s*\$?\s*([\d,]+\.\d{2})', full_text, re.IGNORECASE)
     if deb_m:
         try:
             expected_debits = float(deb_m.group(1).replace(',', ''))
@@ -130,7 +131,7 @@ def extract_statement_metadata(all_lines):
             pass
 
     expected_credits = None
-    cred_m = re.search(r'(?:Payments/credits\s*-|SUB-TOTAL\s+CREDITS.*?)\s*\$?\s*([\d,]+\.\d{2})', full_text, re.IGNORECASE)
+    cred_m = re.search(r'(?:Payments/credits\s*-|SUB-TOTAL\s+CREDITS.*?|Credits\s+\d+\s+)\s*\$?\s*([\d,]+\.\d{2})', full_text, re.IGNORECASE)
     if cred_m:
         try:
             expected_credits = float(cred_m.group(1).replace(',', ''))
@@ -215,7 +216,7 @@ RESPOND ONLY with a single valid JSON object in this exact schema (no markdown p
 }
 """
 
-    chosen_model = model or "claude-sonnet-4-5-20250929"
+    chosen_model = model or "claude-3-5-haiku-20241022"
 
     try:
         response = client.messages.create(
@@ -242,9 +243,9 @@ RESPOND ONLY with a single valid JSON object in this exact schema (no markdown p
             ]
         )
     except Exception as e:
-        # Fallback to claude-haiku-4-5-20251001 if chosen model fails
-        if chosen_model != "claude-haiku-4-5-20251001":
-            chosen_model = "claude-haiku-4-5-20251001"
+        # Fallback to claude-3-haiku-20240307 if chosen model fails
+        if chosen_model != "claude-3-haiku-20240307":
+            chosen_model = "claude-3-haiku-20240307"
             response = client.messages.create(
                 model=chosen_model,
                 max_tokens=8192,
@@ -387,9 +388,19 @@ def parse_statement_pdf_heuristic(pdf_source):
     year = meta['year']
 
     row_pattern = re.compile(
-        rf'^(?:(?P<ref>\d{{3,4}})\s+)?(?P<date1>{MONTH_REGEX_STR}\s+\d{{1,2}}|\d{{1,2}}[/\-.]\d{{1,2}}(?:[/\-.]\d{{2,4}})?)\s+(?:(?P<date2>{MONTH_REGEX_STR}\s+\d{{1,2}}|\d{{1,2}}[/\-.]\d{{1,2}})\s+)?(?P<rest>.*)$',
+        rf'^(?:(?P<ref>\d{{3,4}})\s+)?(?P<date1>{MONTH_REGEX_STR}\s*\d{{1,2}}|\d{{1,2}}[/\-.]\d{{1,2}}(?:[/\-.]\d{{2,4}})?)\s+(?:(?P<date2>{MONTH_REGEX_STR}\s*\d{{1,2}}|\d{{1,2}}[/\-.]\d{{1,2}})\s+)?(?P<rest>.*)$',
         re.IGNORECASE
     )
+    # TD Canada Trust & Description-First Bank Statement Pattern (Description ... Cheque/Debit ... Deposit/Credit ... Date ... Balance)
+    td_row_pattern = re.compile(
+        rf'^(?P<desc>.+?)\s+'
+        rf'(?P<amt1>[\d,]+\.\d{{2}})\s+'
+        rf'(?:(?P<amt2>[\d,]+\.\d{{2}})\s+)?'
+        rf'(?P<date>{MONTH_REGEX_STR}\s*\d{{1,2}})'
+        rf'(?:\s+(?P<bal>[\d,]+\.\d{{2}}(?:OD)?))?$',
+        re.IGNORECASE
+    )
+    credit_keywords = ['DEPOSIT', 'TFR-FR', 'TRANSFER FROM', 'CREDIT', 'REFUND', 'CR', 'AUTODEPOSIT', 'E-TRANSFER', 'DIRECT DEP', 'PAYROLL', 'INTEREST PAID', 'REVERSAL']
     amount_pattern = re.compile(r'(\$?\s*[\d,]+\.\d{2})(-|CR)?$', re.IGNORECASE)
 
     tx_start_keywords = [
@@ -398,7 +409,13 @@ def parse_statement_pdf_heuristic(pdf_source):
         'TRANSACTIONS',
         'ACCOUNT ACTIVITY',
         'STATEMENT ACTIVITY',
-        'DETAILS OF YOUR TRANSACTIONS'
+        'DETAILS OF YOUR TRANSACTIONS',
+        'DESCRIPTION',
+        'CHEQUE/DEBIT',
+        'DEPOSIT/CREDIT',
+        'STATEMENT OF ACCOUNT',
+        'BUSINESS CHEQUING',
+        'PERSONAL CHEQUING'
     ]
 
     tx_end_keywords = [
@@ -412,7 +429,11 @@ def parse_statement_pdf_heuristic(pdf_source):
         'ACCOUNT SUMMARY',
         'REWARD POINTS SUMMARY',
         'FEES CHARGED',
-        'INTEREST CHARGED'
+        'INTEREST CHARGED',
+        'CHQS ENCLOSED',
+        'MONTHLY AVER.',
+        'ITEMS 1',
+        'UNC BATCH'
     ]
 
     in_transaction_section = False
@@ -437,13 +458,16 @@ def parse_statement_pdf_heuristic(pdf_source):
             in_transaction_section = False
             continue
 
+        if re.match(r'^(BALANCE\s+FORWARD|OPENING\s+BALANCE|PREVIOUS\s+BALANCE)', upper):
+            continue
+
         if not in_transaction_section:
-            if row_pattern.match(line_text) and amount_pattern.search(line_text):
+            if (row_pattern.match(line_text) and amount_pattern.search(line_text)) or td_row_pattern.match(line_text):
                 in_transaction_section = True
             else:
                 continue
 
-        if re.search(r'^(REF\.?#|TRANS\.?\s*DATE|POST\s*DATE|DETAILS|AMOUNT|ACCOUNT|CARDMEMBER)', upper):
+        if re.search(r'^(REF\.?#|TRANS\.?\s*DATE|POST\s*DATE|DETAILS|AMOUNT|ACCOUNT|CARDMEMBER|CHEQUE/DEBIT|DEPOSIT/CREDIT)', upper):
             continue
         if re.search(r'^[A-Z\s\-]+-\s*\d{4}\s*X+', upper):
             continue
@@ -451,6 +475,30 @@ def parse_statement_pdf_heuristic(pdf_source):
             if current_tx and current_tx.get('amount'):
                 transactions.append(current_tx)
                 current_tx = None
+            continue
+
+        # Check TD / Description-first pattern
+        td_match = td_row_pattern.match(line_text)
+        if td_match:
+            if current_tx and current_tx.get('amount'):
+                transactions.append(current_tx)
+                current_tx = None
+
+            td_desc = td_match.group('desc').strip()
+            td_amt1 = td_match.group('amt1').replace(',', '')
+            td_amt2 = (td_match.group('amt2') or '').replace(',', '')
+            td_raw_date = td_match.group('date')
+            td_date_formatted = parse_date_to_dmy(td_raw_date, year)
+
+            is_cred = any(k in td_desc.upper() for k in credit_keywords)
+            transactions.append({
+                'date': td_date_formatted,
+                'desc_lines': [td_desc],
+                'amount': td_amt1,
+                'is_credit': is_cred,
+                'has_ref': False,
+                'raw_date': td_raw_date
+            })
             continue
 
         match = row_pattern.match(line_text)
